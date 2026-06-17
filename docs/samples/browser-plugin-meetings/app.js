@@ -893,6 +893,10 @@ const muteAudioMessage = document.querySelector('#ts-mute-audio-message');
 const defaultShareMessage = document.querySelector('#ts-default-share-message');
 const brbShareMessage = document.querySelector('#ts-brb-share-message');
 const modeBtn = document.getElementById('mode-type');
+const localShareSourceResElm = document.getElementById('local-share-source-res');
+const localShareScaleElm = document.getElementById('local-share-scale');
+const localShareSentResElm = document.getElementById('local-share-sent-res');
+const resolutionRaceStatusElm = document.getElementById('resolution-race-status');
 
 /**
  * Enables and disables the UI elements specific to multistream or transcoded connections
@@ -2744,6 +2748,125 @@ async function getStatsForVideoPane(meeting, videoPane) {
 
   return result;
 }
+
+// SPARK-821024 - Video send-scale resolution race reproduction helpers.
+// The race lives in WCME's SendOnlyTransceiver.updateSendParameters(): scaleResolutionDownBy is
+// derived from publishedStream.getSettings(). If a VIDEO-SLIDES request is processed before the
+// shared track exposes its width/height, the downscale is skipped and the slides keep going out at
+// full source resolution. See:
+// https://confluence-eng-gpk2.cisco.com/conf/spaces/webexmedia/pages/860856396
+function getShareVideoSendTransceiver() {
+  const meeting = getCurrentMeeting();
+  const multistreamConnection =
+    meeting?.mediaProperties?.webrtcMediaConnection?.multistreamConnection;
+
+  // there is no public WCME API to get the send transceiver, so we access the private field
+  // (same approach as getStatsForVideoPane above for the receive side)
+  return multistreamConnection?.sendTransceivers?.get('VIDEO-SLIDES');
+}
+
+// SENDER side: hide the shared track's source dimensions for `ms`, so that any VIDEO-SLIDES request
+// processed during that window cannot compute a scale and keeps the previous (full) resolution.
+function armSlidesRace(ms = 8000) {
+  const stream = localMedia.screenShare.video;
+
+  if (!stream) {
+    resolutionRaceStatusElm.innerText =
+      'Start + publish a screen share (ideally >= 1080p) before arming the race.';
+
+    return;
+  }
+
+  const realGetSettings = stream.getSettings.bind(stream);
+
+  stream.getSettings = () => ({});
+
+  const armedMessage = `SENDER armed: VIDEO-SLIDES source dimensions hidden for ${ms}ms. Now click "Request slides @720p" on the RECEIVER tab within this window.`;
+
+  console.log(`[repro] ${armedMessage}`);
+  resolutionRaceStatusElm.innerText = armedMessage;
+
+  setTimeout(() => {
+    stream.getSettings = realGetSettings;
+
+    const restoredMessage =
+      'SENDER restored real getSettings(). If a lower-resolution request was processed while armed, the slides stay oversized - nothing re-applies the downscale.';
+
+    console.log(`[repro] ${restoredMessage}`);
+    resolutionRaceStatusElm.innerText = restoredMessage;
+  }, ms);
+}
+
+// RECEIVER side: request the sharer's slides at a lower resolution (720p) by setting a size hint on
+// the received screen-share remote media. This re-sends the media request to the sharer; combine it
+// with armSlidesRace() on the sharer to reproduce the send-scale race.
+function requestSlidesAtLowerRes() {
+  const slidesRemoteMedia = Object.values(remoteMediaIds).find(
+    (remoteMedia) => remoteMedia.mediaType === 'VIDEO-SLIDES'
+  );
+
+  if (!slidesRemoteMedia) {
+    resolutionRaceStatusElm.innerText =
+      'No received slides found. Make sure the other tab is sharing first.';
+
+    return;
+  }
+
+  slidesRemoteMedia.setSizeHint(1280, 720);
+
+  const message = 'RECEIVER requested slides @720p (size hint 1280x720).';
+
+  console.log(`[repro] ${message}`);
+  resolutionRaceStatusElm.innerText = message;
+}
+
+async function updateLocalShareSendStats() {
+  const stream = localMedia.screenShare.video;
+
+  // source dimensions reported by the shared track - this is the input the race depends on
+  if (stream) {
+    const {width, height} = stream.getSettings();
+
+    localShareSourceResElm.innerText = width && height ? `${width}x${height}` : '(no dimensions)';
+  } else {
+    localShareSourceResElm.innerText = '-';
+  }
+
+  const transceiver = getShareVideoSendTransceiver();
+
+  if (!transceiver || !transceiver.sender) {
+    localShareScaleElm.innerText = '-';
+    localShareSentResElm.innerText = '-';
+
+    return;
+  }
+
+  try {
+    const params = transceiver.sender.getParameters();
+    const scale = params?.encodings?.[0]?.scaleResolutionDownBy;
+
+    localShareScaleElm.innerText = scale === undefined ? '(unset = 1)' : `${scale}`;
+  } catch (error) {
+    localShareScaleElm.innerText = '-';
+  }
+
+  try {
+    const stats = await transceiver.sender.getStats();
+    let sent = '-';
+
+    stats.forEach((report) => {
+      if (report.type === 'outbound-rtp' && report.frameWidth && report.frameHeight) {
+        sent = `${report.frameWidth}x${report.frameHeight}`;
+      }
+    });
+
+    localShareSentResElm.innerText = sent;
+  } catch (error) {
+    localShareSentResElm.innerText = '-';
+  }
+}
+
+setInterval(updateLocalShareSendStats, 1000);
 
 let remoteMediaIds = {};
 

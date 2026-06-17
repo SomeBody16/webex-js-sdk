@@ -818,6 +818,33 @@
                 <button id="ts-stop-screenshare" type="button" disabled onclick="stopScreenShare()" class="btn-code">
                   Stop share</button>
               </div>
+
+              <fieldset id="resolution-race-fieldset" style="margin-top: 1rem;">
+                <legend>Resolution Race repro (SPARK-821024)</legend>
+                <p class="note">
+                  Reproduce the video send-scale resolution race. Open this app in <b>two tabs</b> in the
+                  same meeting.
+                  <br />1. <b>SHARER tab:</b> share a <b>&ge;1080p</b> screen and click "Publish in meeting".
+                  <br />2. <b>SHARER tab:</b> click "Arm slides race" (hides the shared track's source
+                  dimensions for ~8s).
+                  <br />3. <b>RECEIVER tab</b> (within those ~8s): click "Request slides @720p".
+                  <br />Watch "Sent resolution" on the SHARER: with the bug it stays at the full source
+                  resolution (e.g. 1920x1080, scale = 1) instead of dropping to the requested 1280x720.
+                </p>
+                <div class="share-send-stats" style="margin-bottom: 8px;">
+                  Source: <b id="local-share-source-res">-</b> |
+                  scaleResolutionDownBy: <b id="local-share-scale">-</b> |
+                  Sent resolution: <b id="local-share-sent-res">-</b>
+                </div>
+                <div class="btn-group">
+                  <button id="ts-arm-slides-race" type="button" onclick="armSlidesRace()" class="btn-code">
+                    Arm slides race (hide source settings 8s)</button>
+                  <button id="ts-request-slides-lowres" type="button" onclick="requestSlidesAtLowerRes()"
+                    class="btn-code">
+                    Request slides @720p (receiver)</button>
+                </div>
+                <span id="resolution-race-status" class="webex-info"></span>
+              </fieldset>
             </div>
           </fieldset>
         </form>
