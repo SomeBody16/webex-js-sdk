@@ -21,6 +21,7 @@ import LoggerRequest from '../common/logs/request';
 import Trigger from '../common/events/trigger-proxy';
 import Media from '../media';
 import MeetingUtil from '../meeting/util';
+import {setNextCleanupSource, spark871464Log} from '../meeting/spark871464Diagnostics';
 import WasmLoader from '../common/wasm-loader';
 import E2eeManager from '../e2ee/E2eeManager';
 import {
@@ -1510,6 +1511,10 @@ export default class Meetings extends WebexPlugin {
    * @memberof Meetings
    */
   private destroy(meeting: Meeting, reason: object) {
+    spark871464Log(
+      `Meetings:index#destroy --> destroying meeting; reason=${reason}; meetingId=${meeting?.id}; correlationId=${meeting?.correlationId}`
+    );
+    setNextCleanupSource(meeting, `collection-destroy:${reason}`);
     MeetingUtil.cleanUp(meeting, {preserveVoiceaChannel: false});
 
     // Tear down hash tree parsers here (and not in MeetingUtil.cleanUp) so they survive

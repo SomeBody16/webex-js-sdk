@@ -5,6 +5,12 @@ import {cloneDeep} from 'lodash';
 import {MeetingNotActiveError, UserNotJoinedError} from '../common/errors/webex-errors';
 import LoggerProxy from '../common/logs/logger-proxy';
 import {
+  setNextCleanupSource,
+  spark871464Log,
+  startCleanupTracking,
+  trackPending,
+} from './spark871464Diagnostics';
+import {
   INTENT_TO_JOIN,
   _LEFT_,
   _IDLE_,
@@ -366,6 +372,8 @@ const MeetingUtil = {
   },
 
   cleanUp: (meeting, {preserveVoiceaChannel = true}: {preserveVoiceaChannel?: boolean} = {}) => {
+    const diag = startCleanupTracking(meeting, preserveVoiceaChannel);
+
     meeting.getWebexObject().internal.device.meetingEnded();
     meeting.stopPeriodicLogUpload();
 
@@ -379,14 +387,28 @@ const MeetingUtil = {
     );
 
     // make sure we send last metrics before we close the peerconnection
+    diag.step(
+      meeting.statsAnalyzer
+        ? 'Waiting for StatsAnalyzer.stopAnalyzer'
+        : 'No StatsAnalyzer, skipping stopAnalyzer'
+    );
     const stopStatsAnalyzer = meeting.statsAnalyzer
       ? meeting.statsAnalyzer.stopAnalyzer()
       : Promise.resolve();
 
     return stopStatsAnalyzer
-      .then(() => meeting.closeRemoteStreams())
-      .then(() => meeting.closePeerConnections())
       .then(() => {
+        diag.step('StatsAnalyzer.stopAnalyzer resolved; closing remote streams');
+
+        return meeting.closeRemoteStreams();
+      })
+      .then(() => {
+        diag.step('Closing peer connections');
+
+        return meeting.closePeerConnections();
+      })
+      .then(() => {
+        diag.step('Peer connections closed; cleaning up streams and stopping keepalive');
         meeting.cleanupLocalStreams();
         meeting.unsetRemoteStreams();
         meeting.unsetPeerConnections();
@@ -395,11 +417,25 @@ const MeetingUtil = {
       .then(() => meeting.stopKeepAlive())
       .then(() => {
         if (meeting.config?.enableAutomaticLLM) {
+          diag.step('Cleaning up LLM connection');
+
           return meeting.cleanupLLMConneciton({throwOnError: false, preserveVoiceaChannel});
         }
 
         return undefined;
-      });
+      })
+      .then(
+        (result) => {
+          diag.done();
+
+          return result;
+        },
+        (error) => {
+          diag.fail(error);
+
+          throw error;
+        }
+      );
   },
 
   disconnectPhoneAudio: (meeting, phoneUrl) => {
@@ -457,12 +493,29 @@ const MeetingUtil = {
 
     const leaveOptions = MeetingUtil.prepareLeaveMeetingOptions(meeting, options);
 
-    return meeting.meetingRequest
-      .leaveMeeting(leaveOptions)
-      .then(() => {
+    spark871464Log(
+      `Meeting:util#leaveMeeting --> sending Locus /leave; moveMeeting=${!!options.moveMeeting}; meetingId=${
+        meeting.id
+      }; correlationId=${meeting.correlationId}`
+    );
+
+    return trackPending(
+      'Meeting:util#leaveMeeting Locus /leave request',
+      meeting,
+      meeting.meetingRequest.leaveMeeting(leaveOptions)
+    )
+      .then((response: any) => {
+        const self = response?.body?.locus?.self;
+
+        spark871464Log(
+          `Meeting:util#leaveMeeting --> Locus /leave succeeded; responseSelfState=${self?.state}; responseSelfRemoved=${self?.removed}; meetingId=${meeting.id}`
+        );
+
         if (options.moveMeeting) {
           return Promise.resolve();
         }
+
+        setNextCleanupSource(meeting, 'leave');
 
         return MeetingUtil.cleanUp(meeting);
       })
@@ -739,7 +792,11 @@ const MeetingUtil = {
 
     return meeting.meetingRequest
       .endMeetingForAll(endOptions)
-      .then(() => MeetingUtil.cleanUp(meeting))
+      .then(() => {
+        setNextCleanupSource(meeting, 'endMeetingForAll');
+
+        return MeetingUtil.cleanUp(meeting);
+      })
       .catch((err) => {
         LoggerProxy.logger.error(
           `Meeting:util#endMeetingForAll An error occured while trying to end meeting for all with an id of ${meeting.id}, error: ${err}`

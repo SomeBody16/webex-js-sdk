@@ -90,6 +90,7 @@ import ReconnectionNotStartedError from '../common/errors/reconnection-not-start
 import MeetingRequest from './request';
 import Members from '../members/index';
 import MeetingUtil from './util';
+import {setNextCleanupSource, spark871464Log, trackPending} from './spark871464Diagnostics';
 import MeetingsUtil from '../meetings/util';
 import RecordingUtil from '../recording-controller/util';
 import ControlsOptionsUtil from '../controls-options-manager/util';
@@ -4162,6 +4163,9 @@ export default class Meeting extends StatelessWebexPlugin {
       }
     });
     this.locusInfo.on(EVENTS.DESTROY_MEETING, async (payload) => {
+      spark871464Log(
+        `Meeting:index#setUpLocusInfoMeetingListener --> DESTROY_MEETING received; reason=${payload?.reason}; shouldLeave=${payload?.shouldLeave}; meetingId=${this.id}; correlationId=${this.correlationId}`
+      );
       // if self state is NOT left
 
       // TODO: Handle sharing and wireless sharing when meeting end
@@ -4202,6 +4206,10 @@ export default class Meeting extends StatelessWebexPlugin {
           payload.reason
         );
 
+        spark871464Log(
+          `Meeting:index#setUpLocusInfoMeetingListener --> DESTROY_MEETING (${payload.reason}) starting cleanup; meetingId=${this.id}; correlationId=${this.correlationId}`
+        );
+        setNextCleanupSource(this, `locus-destroy:${payload.reason}`);
         MeetingUtil.cleanUp(this);
         Trigger.trigger(
           this,
@@ -9609,10 +9617,16 @@ export default class Meeting extends StatelessWebexPlugin {
         options: {meetingId: this.id},
       });
     LoggerProxy.logger.log('Meeting:index#leave --> Leaving a meeting');
+    spark871464Log(
+      `Meeting:index#leave --> started; reason=${leaveReason}; meetingId=${this.id}; correlationId=${this.correlationId}`
+    );
     this.stopListeningForMeetingEvents();
 
-    return MeetingUtil.leaveMeeting(this, options)
+    const spark871464Leave = MeetingUtil.leaveMeeting(this, options)
       .then(async (leave) => {
+        spark871464Log(
+          `Meeting:index#leave --> MeetingUtil.leaveMeeting resolved (Locus /leave + cleanUp done); clearing meeting data; meetingId=${this.id}`
+        );
         // CA team recommends submitting this *after* locus /leave
         submitLeaveMetric();
 
@@ -9687,6 +9701,8 @@ export default class Meeting extends StatelessWebexPlugin {
 
         return Promise.reject(error);
       });
+
+    return trackPending('Meeting:index#leave', this, spark871464Leave);
   }
 
   /**
